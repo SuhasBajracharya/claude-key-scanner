@@ -60,6 +60,7 @@ class GitHubAPIScanner:
         self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, ".scan_cache.json")
         self.scanned_repos = {}
+        self.cache_ttl_hours = 24  # Cache expires after 24 hours
         
         # Claude API key patterns
         self.claude_key_patterns = [
@@ -280,10 +281,27 @@ class GitHubAPIScanner:
             print(f"[!] Failed to save cache: {e}")
     
     def is_repo_cached(self, repo_name: str) -> bool:
-        """Check if a repo has already been scanned."""
+        """Check if a repo has already been scanned (and cache hasn't expired)."""
         if not self.use_cache:
             return False
-        return repo_name in self.scanned_repos
+        
+        if repo_name not in self.scanned_repos:
+            return False
+        
+        # Check if cache entry has expired
+        cached_entry = self.scanned_repos[repo_name]
+        if isinstance(cached_entry, dict) and 'timestamp' in cached_entry:
+            try:
+                cached_time = datetime.fromisoformat(cached_entry['timestamp'])
+                age_hours = (datetime.now() - cached_time).total_seconds() / 3600
+                
+                if age_hours > self.cache_ttl_hours:
+                    # Cache expired, mark for re-scan
+                    return False
+            except Exception:
+                pass
+        
+        return True
     
     def mark_repo_scanned(self, repo_name: str, findings_count: int = 0) -> None:
         """Mark a repo as scanned in the cache."""

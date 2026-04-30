@@ -27,7 +27,7 @@ except ImportError:
 
 
 class GitHubAPIScanner:
-    def __init__(self, github_token: Optional[str] = None, validate_keys: bool = False):
+    def __init__(self, github_token: Optional[str] = None, validate_keys: bool = False, cache_dir: str = "results", use_cache: bool = True):
         self.base_url = "https://api.github.com"
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
@@ -55,6 +55,12 @@ class GitHubAPIScanner:
         self.token_valid = False
         self.validation_results = {'valid': [], 'invalid': [], 'error': []}
         
+        # Cache configuration
+        self.use_cache = use_cache
+        self.cache_dir = cache_dir
+        self.cache_file = os.path.join(cache_dir, ".scan_cache.json")
+        self.scanned_repos = {}
+        
         # Claude API key patterns
         self.claude_key_patterns = [
             r'sk-ant-api\d{2}-[a-zA-Z0-9_-]{32,}',
@@ -72,6 +78,10 @@ class GitHubAPIScanner:
             'anthropic api_key sk-ant',
             'x-api-key sk-ant',
         ]
+        
+        # Load cache if enabled
+        if self.use_cache:
+            self.load_cache()
 
     def check_rate_limits(self) -> bool:
         try:
@@ -243,6 +253,48 @@ class GitHubAPIScanner:
         
         return findings
 
+    def load_cache(self) -> None:
+        """Load scan cache from disk."""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r') as f:
+                    self.scanned_repos = json.load(f)
+                print(f"[+] Loaded cache with {len(self.scanned_repos)} scanned repos")
+            except Exception as e:
+                print(f"[!] Failed to load cache: {e}")
+                self.scanned_repos = {}
+        else:
+            self.scanned_repos = {}
+    
+    def save_cache(self) -> None:
+        """Save scan cache to disk."""
+        if not self.use_cache:
+            return
+        
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            with open(self.cache_file, 'w') as f:
+                json.dump(self.scanned_repos, f, indent=2)
+            print(f"[+] Cache saved ({len(self.scanned_repos)} repos tracked)")
+        except Exception as e:
+            print(f"[!] Failed to save cache: {e}")
+    
+    def is_repo_cached(self, repo_name: str) -> bool:
+        """Check if a repo has already been scanned."""
+        if not self.use_cache:
+            return False
+        return repo_name in self.scanned_repos
+    
+    def mark_repo_scanned(self, repo_name: str, findings_count: int = 0) -> None:
+        """Mark a repo as scanned in the cache."""
+        if not self.use_cache:
+            return
+        
+        self.scanned_repos[repo_name] = {
+            'timestamp': datetime.now().isoformat(),
+            'findings': findings_count
+        }
+
     def _extract_full_key(self, context: str) -> Optional[str]:
         """Extract the full API key from context."""
         patterns = [
@@ -345,6 +397,12 @@ class GitHubAPIScanner:
                 repo_name = result['repository']['full_name']
                 file_path = result['path']
                 
+                # Check if repo already scanned
+                if self.is_repo_cached(repo_name):
+                    print(f"  [{j}/{len(search_results)}] {repo_name} (cached, skipping)")
+                    self.stats['repos_cached'] += 1
+                    continue
+                
                 print(f"  [{j}/{len(search_results)}] Checking {repo_name}/{file_path}")
                 
                 if self._should_skip_file(file_path):
@@ -375,6 +433,12 @@ class GitHubAPIScanner:
                         self.results.extend(findings)
                         if any(not f.get('is_placeholder', True) for f in findings):
                             self.stats['affected_repos'] += 1
+                        
+                        # Mark repo as scanned with findings count
+                        self.mark_repo_scanned(repo_name, len(findings))
+                    else:
+                        # Mark repo as scanned even with no findings
+                        self.mark_repo_scanned(repo_name, 0)
                 
                 self.stats['files_checked'] += 1
                 
@@ -431,6 +495,9 @@ class GitHubAPIScanner:
         print("\n" + "=" * 60)
         print(self.get_summary())
         
+        # Save cache after scan completes
+        self.save_cache()
+        
         return self.results
 
     def _should_skip_file(self, file_path: str) -> bool:
@@ -462,6 +529,7 @@ class GitHubAPIScanner:
         summary.append("=" * 60)
         summary.append(f"Total search results examined: {self.stats['total_search_results']}")
         summary.append(f"Files checked: {self.stats['files_checked']}")
+        summary.append(f"Repositories cached (skipped): {self.stats.get('repos_cached', 0)}")
         summary.append(f"Potential API keys found: {self.stats['keys_found']}")
         summary.append(f"Affected repositories: {self.stats['affected_repos']}")
         
@@ -549,6 +617,10 @@ The token needs 'public_repo' scope.
                        help='Maximum pages per query (default: 3)')
     parser.add_argument('--output', '-o', default='results',
                        help='Output directory for results (default: results)')
+    parser.add_argument('--no-cache', action='store_true',
+                       help='Disable repo caching (always scan all repos)')
+    parser.add_argument('--force-refresh', action='store_true',
+                       help='Clear cache before scanning')
     
     args = parser.parse_args()
     
@@ -567,7 +639,19 @@ The token needs 'public_repo' scope.
         args.validate = False
     
     try:
-        scanner = GitHubAPIScanner(token, validate_keys=args.validate)
+        # Handle cache refresh flag
+        if args.force_refresh:
+            cache_file = os.path.join(args.output, ".scan_cache.json")
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+                print("[+] Cache cleared")
+        
+        scanner = GitHubAPIScanner(
+            token, 
+            validate_keys=args.validate,
+            cache_dir=args.output,
+            use_cache=not args.no_cache
+        )
         scanner.scan(
             max_queries=args.max_queries,
             max_pages_per_query=args.max_pages

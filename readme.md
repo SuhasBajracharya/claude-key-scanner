@@ -57,6 +57,25 @@ export GITHUB_TOKEN="your_token"
 python scraper.py --validate
 ```
 
+## Caching
+
+By default, the scanner maintains a cache of already-scanned repositories to improve performance on subsequent scans.
+
+### Disable Caching
+```bash
+python scraper.py --token YOUR_TOKEN --no-cache
+```
+
+### Clear Cache and Force Full Rescan
+```bash
+python scraper.py --token YOUR_TOKEN --force-refresh
+```
+
+The cache is stored as `.scan_cache.json` in the results directory and tracks:
+- Repository name
+- Last scan timestamp
+- Number of findings per repo
+
 ## Results
 
 Scan results are saved to the `results/` directory as timestamped JSON files with the format: `YYYY-MM-DD_HH-MM-SS.json`

@@ -22,3 +22,5 @@ env/
 venv/
 results/*.json
 .DS_Store
+UPDATES.md
+CHANGES.md

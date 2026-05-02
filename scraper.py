@@ -22,8 +22,29 @@ try:
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
-    print("[!] anthropic package not installed. Key validation will be skipped.")
-    print("[!] Install with: pip install anthropic")
+
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
+    from huggingface_hub import InferenceClient
+    HUGGINGFACE_AVAILABLE = True
+except ImportError:
+    HUGGINGFACE_AVAILABLE = False
+
+# Print availability status
+if not any([ANTHROPIC_AVAILABLE, OPENAI_AVAILABLE, GEMINI_AVAILABLE, HUGGINGFACE_AVAILABLE]):
+    print("[!] No API validation packages installed.")
+    print("[!] Install with: pip install anthropic openai google-generativeai huggingface-hub")
 
 
 class GitHubAPIScanner:
@@ -34,7 +55,7 @@ class GitHubAPIScanner:
             "User-Agent": "Claude-Key-Scanner/2.0"
         }
         
-        self.validate_keys = validate_keys and ANTHROPIC_AVAILABLE
+        self.validate_keys = validate_keys and any([ANTHROPIC_AVAILABLE, OPENAI_AVAILABLE, GEMINI_AVAILABLE, HUGGINGFACE_AVAILABLE])
         
         if github_token:
             github_token = github_token.strip()
@@ -62,22 +83,118 @@ class GitHubAPIScanner:
         self.scanned_repos = {}
         self.cache_ttl_hours = 24  # Cache expires after 24 hours
         
-        # Claude API key patterns
-        self.claude_key_patterns = [
-            r'sk-ant-api\d{2}-[a-zA-Z0-9_-]{32,}',
-            r'sk-ant-[a-zA-Z0-9_-]{32,}',
-            r'(?:ANTHROPIC_API_KEY|claude.*api[_-]?key)\s*[:=]\s*["\']?(sk-ant-[^"\'\s]+)',
-            r'x-api-key["\']?\s*[:=]\s*["\'](sk-ant-[^"\'\s]+)',
-            r'apiKey["\']?\s*[:=]\s*["\'](sk-ant-[^"\'\s]+)',
-        ]
+        # Define API patterns by type
+        self.api_patterns = {
+            'anthropic': {
+                'name': 'Anthropic/Claude',
+                'patterns': [
+                    r'sk-ant-api\d{2}-[a-zA-Z0-9_-]{32,}',
+                    r'sk-ant-[a-zA-Z0-9_-]{32,}',
+                    r'(?:ANTHROPIC_API_KEY|claude.*api[_-]?key)\s*[:=]\s*["\']?(sk-ant-[^"\'\s]+)',
+                    r'x-api-key["\']?\s*[:=]\s*["\'](sk-ant-[^"\'\s]+)',
+                    r'apiKey["\']?\s*[:=]\s*["\'](sk-ant-[^"\'\s]+)',
+                ]
+            },
+            'openai': {
+                'name': 'OpenAI/ChatGPT',
+                'patterns': [
+                    r'sk-proj-[a-zA-Z0-9_-]{32,}',
+                    r'(?:openai.*key|chatgpt.*key|gpt.*api[_-]?key|openai[_-]?api[_-]?key)\s*[:=]\s*["\']?(sk-[^"\'\s]+)',
+                    r'sk-[a-zA-Z0-9]{48,}(?:[a-zA-Z0-9_-]{0,})',
+                ]
+            },
+            'gemini': {
+                'name': 'Google Gemini/Vertex AI',
+                'patterns': [
+                    r'AIza[0-9A-Za-z_-]{35}',
+                    r'(?:gemini.*key|google.*ai.*key)\s*[:=]\s*["\']?([aA][iI][zZ]a[0-9A-Za-z_-]{35})',
+                ]
+            },
+            'huggingface': {
+                'name': 'Hugging Face',
+                'patterns': [
+                    r'hf_[a-zA-Z0-9_-]{34,}',
+                    r'(?:hugging.*face|hf[_-]?token)\s*[:=]\s*["\']?(hf_[a-zA-Z0-9_-]{34,})',
+                ]
+            },
+            'cohere': {
+                'name': 'Cohere',
+                'patterns': [
+                    r'(?:cohere.*key|cohere[_-]?api)\s*[:=]\s*["\']([\da-f-]{36})',
+                ]
+            },
+            'deepseek': {
+                'name': 'DeepSeek',
+                'patterns': [
+                    r'sk-[a-zA-Z0-9]{32,}(?:[a-zA-Z0-9_-]{0,})',  # Similar to OpenAI
+                ]
+            },
+            'vertex_ai': {
+                'name': 'Google Vertex AI/Service Account',
+                'patterns': [
+                    r'"type"\s*:\s*"service_account"[\s\S]{0,2000}?"private_key"',
+                    r'GOOGLE_APPLICATION_CREDENTIALS',
+                ]
+            },
+            'azure_openai': {
+                'name': 'Azure OpenAI',
+                'patterns': [
+                    r'(?:azure.*key|azure[_-]?openai.*key)\s*[:=]\s*["\']([\da-f]{32})',
+                ]
+            },
+            'replicate': {
+                'name': 'Replicate',
+                'patterns': [
+                    r'r8_[a-zA-Z0-9_-]{32,}',
+                ]
+            },
+            'mistral': {
+                'name': 'Mistral AI',
+                'patterns': [
+                    r'(?:mistral.*key|mistral[_-]?api)\s*[:=]\s*["\']([\da-z]{32,})',
+                ]
+            },
+        }
+        
+        # Generate all patterns and queries
+        self.all_patterns = {}
+        for api_type, config in self.api_patterns.items():
+            for pattern in config['patterns']:
+                if pattern not in self.all_patterns:
+                    self.all_patterns[pattern] = api_type
         
         # Search queries
         self.search_queries = [
+            # Anthropic/Claude
             'sk-ant-api03-',
             'sk-ant-',
             'ANTHROPIC_API_KEY sk-ant',
-            'anthropic api_key sk-ant',
-            'x-api-key sk-ant',
+            
+            # OpenAI/ChatGPT
+            'sk-proj-',
+            'openai_api_key sk-',
+            'OPENAI_API_KEY sk-',
+            'chatgpt api key',
+            
+            # Google Gemini
+            'AIza gemini',
+            'google_api_key AIza',
+            
+            # Hugging Face
+            'hf_',
+            'hugging_face_token',
+            
+            # Azure OpenAI
+            'azure_openai_key',
+            'azure openai api',
+            
+            # Cohere
+            'cohere_api_key',
+            'cohere api',
+            
+            # Generic API key patterns
+            'api_key export sk-',
+            'export API_KEY sk-',
         ]
         
         # Load cache if enabled
@@ -213,7 +330,7 @@ class GitHubAPIScanner:
     def extract_api_keys(self, content: str, repo_name: str, file_path: str) -> List[Dict]:
         findings = []
         
-        for pattern in self.claude_key_patterns:
+        for pattern, api_type in self.all_patterns.items():
             try:
                 matches = re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE)
                 for match in matches:
@@ -224,21 +341,25 @@ class GitHubAPIScanner:
                     
                     api_key = api_key.strip('"\' \t\n\r')
                     
-                    if self._is_likely_valid_key(api_key):
+                    if self._is_likely_valid_key(api_key, api_type):
                         start = max(0, match.start() - 40)
                         end = min(len(content), match.end() + 40)
                         context = content[start:end].replace('\n', ' ').strip()
                         
                         # Extract full key from context
-                        full_key = self._extract_full_key(context)
+                        full_key = self._extract_full_key(context, api_type)
                         
                         # Check if placeholder
-                        is_placeholder = self._is_placeholder_key(full_key if full_key else api_key)
+                        is_placeholder = self._is_placeholder_key(full_key if full_key else api_key, api_type)
+                        
+                        api_name = self.api_patterns.get(api_type, {}).get('name', api_type)
                         
                         findings.append({
                             'repository': repo_name,
                             'file_path': file_path,
-                            'api_key_preview': api_key[:25] + '...' + api_key[-5:],
+                            'api_type': api_type,
+                            'api_name': api_name,
+                            'api_key_preview': api_key[:25] + '...' + api_key[-5:] if len(api_key) > 30 else api_key,
                             'full_key': full_key,
                             'key_length': len(api_key),
                             'pattern_matched': pattern,
@@ -248,6 +369,7 @@ class GitHubAPIScanner:
                         })
                         
                         self.stats['keys_found'] += 1
+                        self.stats[f'keys_found_{api_type}'] += 1
                         
             except Exception as e:
                 print(f"    [!] Pattern matching error: {e}")
@@ -313,12 +435,34 @@ class GitHubAPIScanner:
             'findings': findings_count
         }
 
-    def _extract_full_key(self, context: str) -> Optional[str]:
-        """Extract the full API key from context."""
-        patterns = [
-            r'sk-ant-api\d{2}-[a-zA-Z0-9_-]{30,}',
-            r'sk-ant-[a-zA-Z0-9_-]{30,}',
-        ]
+    def _extract_full_key(self, context: str, api_type: str) -> Optional[str]:
+        """Extract the full API key from context based on type."""
+        patterns_by_type = {
+            'anthropic': [
+                r'sk-ant-api\d{2}-[a-zA-Z0-9_-]{30,}',
+                r'sk-ant-[a-zA-Z0-9_-]{30,}',
+            ],
+            'openai': [
+                r'sk-proj-[a-zA-Z0-9_-]{32,}',
+                r'sk-[a-zA-Z0-9]{48,}',
+            ],
+            'gemini': [
+                r'AIza[0-9A-Za-z_-]{35,}',
+            ],
+            'huggingface': [
+                r'hf_[a-zA-Z0-9_-]{34,}',
+            ],
+            'cohere': [
+                r'[\da-f-]{36}',
+            ],
+            'replicate': [
+                r'r8_[a-zA-Z0-9_-]{32,}',
+            ],
+        }
+        
+        patterns = patterns_by_type.get(api_type, [
+            r'[a-zA-Z0-9_-]{30,}',
+        ])
         
         for pattern in patterns:
             match = re.search(pattern, context)
@@ -329,30 +473,57 @@ class GitHubAPIScanner:
         
         return None
 
-    def _is_likely_valid_key(self, key: str) -> bool:
-        if not key:
+    def _is_likely_valid_key(self, key: str, api_type: str) -> bool:
+        """Check if a key looks valid for the given API type."""
+        if not key or len(key) < 10:
             return False
         
-        if re.match(r'^sk-ant-api\d{2}-[a-zA-Z0-9_-]{32,}$', key):
-            return True
-        if re.match(r'^sk-ant-[a-zA-Z0-9_-]{32,}$', key):
-            return True
-            
+        type_patterns = {
+            'anthropic': [
+                r'^sk-ant-api\d{2}-[a-zA-Z0-9_-]{32,}$',
+                r'^sk-ant-[a-zA-Z0-9_-]{32,}$',
+            ],
+            'openai': [
+                r'^sk-proj-[a-zA-Z0-9_-]{32,}$',
+                r'^sk-[a-zA-Z0-9]{48,}$',
+            ],
+            'gemini': [
+                r'^AIza[0-9A-Za-z_-]{35}$',
+            ],
+            'huggingface': [
+                r'^hf_[a-zA-Z0-9_-]{34,}$',
+            ],
+            'cohere': [
+                r'^[\da-f-]{36}$',
+            ],
+            'deepseek': [
+                r'^sk-[a-zA-Z0-9]{32,}$',
+            ],
+            'replicate': [
+                r'^r8_[a-zA-Z0-9_-]{32,}$',
+            ],
+        }
+        
+        patterns = type_patterns.get(api_type, [])
+        for pattern in patterns:
+            if re.match(pattern, key):
+                return True
+        
         return False
 
-    def _is_placeholder_key(self, key: str) -> bool:
-        """Check if a key is just a placeholder (all X's or all 0's)."""
+    def _is_placeholder_key(self, key: str, api_type: str = 'anthropic') -> bool:
+        """Check if a key is just a placeholder (all X's or all 0's, etc)."""
         if not key:
             return True
         
-        # Remove prefix to check the actual key part
+        # Remove prefixes
         key_part = key
-        for prefix in ['sk-ant-api03-', 'sk-ant-api02-', 'sk-ant-api01-', 'sk-ant-']:
+        for prefix in ['sk-ant-api03-', 'sk-ant-api02-', 'sk-ant-api01-', 'sk-ant-', 'sk-proj-', 'sk-', 'hf_', 'AIza', 'r8_']:
             if key_part.startswith(prefix):
                 key_part = key_part[len(prefix):]
                 break
         
-        # Remove common suffixes that might be artifacts
+        # Remove common suffixes
         key_part = key_part.rstrip('"\'.,;:} \t\n\r')
         
         # Check if all alpha characters are 'x' or 'X'
@@ -364,26 +535,74 @@ class GitHubAPIScanner:
         if all(c in '0-' for c in key_part):
             return True
         
+        # For keys that should match pattern, check for pattern-like placeholders
+        if len(key_part) > 20 and key_part.count('0') > len(key_part) * 0.5:
+            return True
+        
         return False
 
-    def validate_api_key(self, api_key: str) -> tuple:
-        """Validate a single API key using Anthropic's API."""
-        if not ANTHROPIC_AVAILABLE:
-            return False, "Anthropic package not installed"
+    def validate_api_key(self, api_key: str, api_type: str = 'anthropic') -> tuple:
+        """Validate a single API key using the appropriate API."""
         
-        try:
-            client = Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=10,
-                messages=[{"role": "user", "content": "ping"}]
-            )
-            return True, f"Response: {response.content[0].text}"
-        except Exception as e:
-            return False, str(e)[:200]
+        if api_type == 'anthropic':
+            if not ANTHROPIC_AVAILABLE:
+                return False, "Anthropic package not installed"
+            try:
+                client = Anthropic(api_key=api_key)
+                response = client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "ping"}]
+                )
+                return True, f"Response: {response.content[0].text}"
+            except Exception as e:
+                return False, str(e)[:200]
+        
+        elif api_type == 'openai':
+            if not OPENAI_AVAILABLE:
+                return False, "OpenAI package not installed"
+            try:
+                client = OpenAI(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=5
+                )
+                return True, f"Response: {response.choices[0].message.content}"
+            except Exception as e:
+                return False, str(e)[:200]
+        
+        elif api_type == 'gemini':
+            if not GEMINI_AVAILABLE:
+                return False, "Google GenAI package not installed"
+            try:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-pro')
+                response = model.generate_content("ping")
+                return True, f"Response: {response.text[:100]}"
+            except Exception as e:
+                return False, str(e)[:200]
+        
+        elif api_type == 'huggingface':
+            if not HUGGINGFACE_AVAILABLE:
+                return False, "Hugging Face package not installed"
+            try:
+                client = InferenceClient(token=api_key)
+                response = client.text_generation(
+                    "test",
+                    model="gpt2",
+                    max_new_tokens=5
+                )
+                return True, f"Response: {response.strip()[:100]}"
+            except Exception as e:
+                return False, str(e)[:200]
+        
+        else:
+            return False, f"No validator for {api_type}"
 
     def scan(self, max_queries: Optional[int] = None, max_pages_per_query: int = 3):
-        print("[*] Starting GitHub scan for exposed Claude API keys")
+        print("[*] Starting GitHub scan for exposed AI API keys")
+        print(f"[*] Scanning for: {', '.join([self.api_patterns[t]['name'] for t in sorted(self.api_patterns.keys())])}")
         
         if self.validate_keys:
             print("[*] Key validation ENABLED - will test found keys")
@@ -398,7 +617,7 @@ class GitHubAPIScanner:
         print(f"[*] Fetching up to {max_pages_per_query} pages per query")
         print("-" * 60)
         
-        # Track unique keys for validation (key -> set of repos)
+        # Track unique keys for validation (key -> {api_type, set of repos})
         unique_keys = {}
         
         for i, query in enumerate(queries_to_use, 1):
@@ -435,16 +654,18 @@ class GitHubAPIScanner:
                     if findings:
                         for finding in findings:
                             full_key = finding.get('full_key')
+                            api_type = finding.get('api_type', 'unknown')
+                            api_name = finding.get('api_name', api_type)
                             is_placeholder = finding.get('is_placeholder', True)
                             
                             # Store unique non-placeholder keys for validation
                             if full_key and not is_placeholder:
                                 if full_key not in unique_keys:
-                                    unique_keys[full_key] = set()
-                                unique_keys[full_key].add(repo_name)
+                                    unique_keys[full_key] = {'type': api_type, 'repos': set()}
+                                unique_keys[full_key]['repos'].add(repo_name)
                             
                             status = "[PLACEHOLDER]" if is_placeholder else "[REAL]"
-                            print(f"    [!] FOUND {status} potential API key!")
+                            print(f"    [!] FOUND {status} {api_name} key!")
                             print(f"        Key preview: {finding['api_key_preview']}")
                             print(f"        Context: {finding['context'][:80]}...")
                         
@@ -478,17 +699,23 @@ class GitHubAPIScanner:
             print(f"[*] Testing {len(unique_keys)} unique keys")
             print("=" * 60)
             
-            for idx, (api_key, repos) in enumerate(unique_keys.items(), 1):
-                print(f"\n[{idx}/{len(unique_keys)}] Testing key: {api_key[:25]}...{api_key[-5:]}")
+            for idx, (api_key, key_info) in enumerate(unique_keys.items(), 1):
+                api_type = key_info.get('type', 'unknown')
+                repos = key_info.get('repos', set())
+                api_name = self.api_patterns.get(api_type, {}).get('name', api_type)
+                
+                print(f"\n[{idx}/{len(unique_keys)}] Testing {api_name} key: {api_key[:25]}...{api_key[-5:]}")
                 print(f"    Full length: {len(api_key)} chars")
                 print(f"    Found in: {', '.join(sorted(repos))}")
                 print(f"    Testing...")
                 
-                is_valid, message = self.validate_api_key(api_key)
+                is_valid, message = self.validate_api_key(api_key, api_type)
                 
                 if is_valid:
                     print(f"    [+] VALID KEY ✓")
                     self.validation_results['valid'].append({
+                        'api_type': api_type,
+                        'api_name': api_name,
                         'key_preview': f"{api_key[:25]}...{api_key[-5:]}",
                         'repositories': list(repos),
                         'response': message
@@ -496,6 +723,8 @@ class GitHubAPIScanner:
                 elif any(x in message.lower() for x in ['401', 'unauthorized', 'authentication', 'invalid', 'permission']):
                     print(f"    [-] INVALID/REVOKED KEY ✗")
                     self.validation_results['invalid'].append({
+                        'api_type': api_type,
+                        'api_name': api_name,
                         'key_preview': f"{api_key[:25]}...{api_key[-5:]}",
                         'repositories': list(repos),
                         'error': message
@@ -503,6 +732,8 @@ class GitHubAPIScanner:
                 else:
                     print(f"    [!] ERROR (not auth-related)")
                     self.validation_results['error'].append({
+                        'api_type': api_type,
+                        'api_name': api_name,
                         'key_preview': f"{api_key[:25]}...{api_key[-5:]}",
                         'repositories': list(repos),
                         'error': message
@@ -549,7 +780,16 @@ class GitHubAPIScanner:
         summary.append(f"Files checked: {self.stats['files_checked']}")
         summary.append(f"Repositories cached (skipped): {self.stats.get('repos_cached', 0)}")
         summary.append(f"Potential API keys found: {self.stats['keys_found']}")
-        summary.append(f"Affected repositories: {self.stats['affected_repos']}")
+        
+        # Show breakdown by API type
+        api_types_found = {k: v for k, v in self.stats.items() if k.startswith('keys_found_')}
+        if api_types_found:
+            summary.append(f"\nKeys found by type:")
+            for api_type, count in sorted(api_types_found.items()):
+                api_name = self.api_patterns.get(api_type.replace('keys_found_', ''), {}).get('name', api_type)
+                summary.append(f"  • {api_name}: {count}")
+        
+        summary.append(f"\nAffected repositories: {self.stats['affected_repos']}")
         
         if self.validate_keys:
             summary.append(f"\nValidation Results:")
@@ -560,7 +800,9 @@ class GitHubAPIScanner:
             if self.validation_results['valid']:
                 summary.append(f"\n[!] ⚠️  VALID API KEYS FOUND:")
                 for key_data in self.validation_results['valid']:
-                    for repo in key_data['repositories']:
+                    api_name = key_data.get('api_name', 'Unknown')
+                    summary.append(f"\n  {api_name}:")
+                    for repo in key_data.get('repositories', []):
                         summary.append(f"    • {repo}")
                     summary.append(f"      Key: {key_data['key_preview']}")
         
@@ -570,12 +812,14 @@ class GitHubAPIScanner:
             if real_findings:
                 summary.append(f"\nTop real findings:")
                 for i, finding in enumerate(real_findings[:5], 1):
+                    api_name = finding.get('api_name', 'Unknown')
                     summary.append(f"{i}. {finding['repository']}")
+                    summary.append(f"   API Type: {api_name}")
                     summary.append(f"   File: {finding['file_path']}")
                     summary.append(f"   Key: {finding['api_key_preview']}")
                     summary.append(f"   Context: {finding['context'][:100]}...")
         else:
-            summary.append("\nNo exposed Claude API keys found.")
+            summary.append("\nNo exposed API keys found.")
             
         return "\n".join(summary)
 
@@ -604,21 +848,32 @@ class GitHubAPIScanner:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Scan GitHub for exposed Claude API keys and optionally validate them',
+        description='Scan GitHub for exposed AI API keys (Claude, OpenAI, Gemini, etc.) and optionally validate them',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Supported API Services:
+  • Anthropic/Claude (sk-ant-*)
+  • OpenAI/ChatGPT (sk-*/sk-proj-*)
+  • Google Gemini/Vertex AI (AIza*)
+  • Hugging Face (hf_*)
+  • Cohere
+  • DeepSeek
+  • Azure OpenAI
+  • Replicate (r8_*)
+  • Mistral AI
+
 Examples:
   # Scan only
-  python scanner.py --token ghp_xxx
+  python scraper.py --token ghp_xxx
   
   # Scan and validate found keys
-  python scanner.py --token ghp_xxx --validate
+  python scraper.py --token ghp_xxx --validate
   
   # Limited scan with validation
-  python scanner.py --token ghp_xxx --max-queries 3 --max-pages 2 --validate
+  python scraper.py --token ghp_xxx --max-queries 3 --max-pages 2 --validate
   
-    # Custom output directory
-    python scanner.py --token ghp_xxx --validate --output results
+  # Custom output directory
+  python scraper.py --token ghp_xxx --validate --output results
 
 NOTE: GitHub REQUIRES authentication for code search.
 Get a token from: https://github.com/settings/tokens
@@ -628,7 +883,7 @@ The token needs 'public_repo' scope.
     
     parser.add_argument('--token', '-t', help='GitHub personal access token (REQUIRED)')
     parser.add_argument('--validate', '-v', action='store_true',
-                       help='Validate found API keys against Claude API')
+                       help='Validate found API keys against their respective services')
     parser.add_argument('--max-queries', type=int, default=None,
                        help='Maximum number of search queries (default: all)')
     parser.add_argument('--max-pages', type=int, default=3,
@@ -650,11 +905,29 @@ The token needs 'public_repo' scope.
         print("[!] Select 'public_repo' scope when creating the token")
         sys.exit(1)
     
-    if args.validate and not ANTHROPIC_AVAILABLE:
-        print("[!] Cannot validate keys: anthropic package not installed")
-        print("[!] Install with: pip install anthropic")
-        print("[!] Continuing with scan only...")
-        args.validate = False
+    # Check available validators
+    available_validators = []
+    if ANTHROPIC_AVAILABLE:
+        available_validators.append("Anthropic/Claude")
+    if OPENAI_AVAILABLE:
+        available_validators.append("OpenAI/ChatGPT")
+    if GEMINI_AVAILABLE:
+        available_validators.append("Google Gemini")
+    if HUGGINGFACE_AVAILABLE:
+        available_validators.append("Hugging Face")
+    
+    if args.validate:
+        if not available_validators:
+            print("[!] Cannot validate keys: no API client packages installed")
+            print("[!] Install one or more of:")
+            print("[!]   pip install anthropic")
+            print("[!]   pip install openai")
+            print("[!]   pip install google-generativeai")
+            print("[!]   pip install huggingface-hub")
+            print("[!] Continuing with scan only...")
+            args.validate = False
+        else:
+            print(f"[+] Available validators: {', '.join(available_validators)}")
     
     try:
         # Handle cache refresh flag
